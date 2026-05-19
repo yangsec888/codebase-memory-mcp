@@ -3,7 +3,17 @@
  */
 #include "test_framework.h"
 #include "../src/foundation/platform.h"
+#include "../src/foundation/system_info_internal.h"
 #include <unistd.h>
+
+#ifdef __linux__
+/* Linux-only cgroup tests need stdio for FILE*, stdlib for mkdtemp,
+ * string for strncpy/strchr, sys/stat for mkdir. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#endif
 
 TEST(platform_now_ns) {
     uint64_t t1 = cbm_now_ns();
@@ -68,6 +78,162 @@ TEST(platform_mmap_nonexistent) {
     PASS();
 }
 
+/* ── cgroup-aware detection (Linux only) ─────────────────────────── */
+
+#ifdef __linux__
+
+/* Create a unique tmp directory the caller will own; returns 0 on success. */
+static int cgroup_test_setup(char *root, size_t root_sz) {
+    strncpy(root, "/tmp/cbm_cgroup_test_XXXXXX", root_sz);
+    return mkdtemp(root) != NULL ? 0 : -1;
+}
+
+/* Write `content` to "<root>/<relpath>". Creates parent subdir if needed.
+ * Returns 0 on success, -1 on any failure. */
+static int cgroup_test_write(const char *root, const char *relpath, const char *content) {
+    char path[1024];
+    const char *slash = strchr(relpath, '/');
+    if (slash != NULL) {
+        char subdir[1024];
+        size_t n = (size_t)(slash - relpath);
+        if (n >= sizeof(subdir)) {
+            return -1;
+        }
+        memcpy(subdir, relpath, n);
+        subdir[n] = '\0';
+        snprintf(path, sizeof(path), "%s/%s", root, subdir);
+        (void)mkdir(path, S_IRWXU);
+    }
+    snprintf(path, sizeof(path), "%s/%s", root, relpath);
+    FILE *fp = fopen(path, "we");
+    if (fp == NULL) {
+        return -1;
+    }
+    size_t n = strlen(content);
+    int rc = (fwrite(content, 1, n, fp) == n) ? 0 : -1;
+    fclose(fp);
+    return rc;
+}
+
+/* Recursively remove a tmp dir created by cgroup_test_setup. Best-effort. */
+static void cgroup_test_teardown(const char *root) {
+    char cmd[1280];
+    snprintf(cmd, sizeof(cmd), "rm -rf -- '%s'", root);
+    (void)system(cmd);
+}
+
+TEST(cgroup_v2_cpu_quota) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    /* 200ms quota in a 100ms period → 2 effective CPUs. */
+    ASSERT_EQ(cgroup_test_write(root, "cpu.max", "200000 100000\n"), 0);
+    ASSERT_EQ(cbm_detect_cgroup_cpus(root), 2);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_v2_cpu_quota_rounds_up) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    /* 150ms quota / 100ms period = 1.5 → ceil = 2. */
+    ASSERT_EQ(cgroup_test_write(root, "cpu.max", "150000 100000\n"), 0);
+    ASSERT_EQ(cbm_detect_cgroup_cpus(root), 2);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_v2_cpu_unlimited) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    ASSERT_EQ(cgroup_test_write(root, "cpu.max", "max 100000\n"), 0);
+    ASSERT_EQ(cbm_detect_cgroup_cpus(root), -1);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_v1_cpu_quota) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    ASSERT_EQ(cgroup_test_write(root, "cpu/cpu.cfs_quota_us", "200000"), 0);
+    ASSERT_EQ(cgroup_test_write(root, "cpu/cpu.cfs_period_us", "100000"), 0);
+    ASSERT_EQ(cbm_detect_cgroup_cpus(root), 2);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_v1_cpu_unlimited) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    /* quota=-1 is the cgroup-v1 sentinel for "no quota". */
+    ASSERT_EQ(cgroup_test_write(root, "cpu/cpu.cfs_quota_us", "-1"), 0);
+    ASSERT_EQ(cgroup_test_write(root, "cpu/cpu.cfs_period_us", "100000"), 0);
+    ASSERT_EQ(cbm_detect_cgroup_cpus(root), -1);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_no_cpu_files) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    /* Empty tmp dir: no v2 file, no v1 file → fall through to sysconf. */
+    ASSERT_EQ(cbm_detect_cgroup_cpus(root), -1);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_v2_mem) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    /* 2 GiB. */
+    ASSERT_EQ(cgroup_test_write(root, "memory.max", "2147483648\n"), 0);
+    ASSERT_EQ(cbm_detect_cgroup_mem(root), (size_t)2147483648UL);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_v2_mem_unlimited) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    ASSERT_EQ(cgroup_test_write(root, "memory.max", "max\n"), 0);
+    ASSERT_EQ(cbm_detect_cgroup_mem(root), (size_t)0);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_v1_mem) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    /* 1 GiB. */
+    ASSERT_EQ(cgroup_test_write(root, "memory/memory.limit_in_bytes", "1073741824"), 0);
+    ASSERT_EQ(cbm_detect_cgroup_mem(root), (size_t)1073741824UL);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_v1_mem_unlimited_sentinel) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    /* cgroup v1 reports a huge near-ULLONG_MAX value when unlimited
+     * (PAGE_COUNTER_MAX). Our parser treats anything >= ULLONG_MAX/2
+     * as effectively unlimited. */
+    ASSERT_EQ(cgroup_test_write(root, "memory/memory.limit_in_bytes",
+                                "9223372036854775807"),
+              0);
+    ASSERT_EQ(cbm_detect_cgroup_mem(root), (size_t)0);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+TEST(cgroup_no_mem_files) {
+    char root[64];
+    ASSERT_EQ(cgroup_test_setup(root, sizeof(root)), 0);
+    ASSERT_EQ(cbm_detect_cgroup_mem(root), (size_t)0);
+    cgroup_test_teardown(root);
+    PASS();
+}
+
+#endif /* __linux__ */
+
 SUITE(platform) {
     RUN_TEST(platform_now_ns);
     RUN_TEST(platform_now_ms);
@@ -77,4 +243,17 @@ SUITE(platform) {
     RUN_TEST(platform_file_size);
     RUN_TEST(platform_mmap);
     RUN_TEST(platform_mmap_nonexistent);
+#ifdef __linux__
+    RUN_TEST(cgroup_v2_cpu_quota);
+    RUN_TEST(cgroup_v2_cpu_quota_rounds_up);
+    RUN_TEST(cgroup_v2_cpu_unlimited);
+    RUN_TEST(cgroup_v1_cpu_quota);
+    RUN_TEST(cgroup_v1_cpu_unlimited);
+    RUN_TEST(cgroup_no_cpu_files);
+    RUN_TEST(cgroup_v2_mem);
+    RUN_TEST(cgroup_v2_mem_unlimited);
+    RUN_TEST(cgroup_v1_mem);
+    RUN_TEST(cgroup_v1_mem_unlimited_sentinel);
+    RUN_TEST(cgroup_no_mem_files);
+#endif
 }
