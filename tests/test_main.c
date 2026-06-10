@@ -97,6 +97,8 @@ extern void suite_grammar_probe_g(void);
 extern void suite_incremental(void);
 extern void suite_simhash(void);
 extern void suite_stack_overflow(void);
+extern void suite_dump_verify(void);
+extern void suite_dump_verify_io(void);
 
 /* Free the main thread's thread-local node-type bitset cache before exit so
  * LeakSanitizer (Linux x64) doesn't report it. Worker threads free their own
@@ -114,6 +116,7 @@ int main(void) {
     RUN_SUITE(log);
     RUN_SUITE(str_util);
     RUN_SUITE(platform);
+    RUN_SUITE(dump_verify);
 
     /* Existing C code regression tests */
     RUN_SUITE(ac);
@@ -131,6 +134,7 @@ int main(void) {
     RUN_SUITE(store_bulk);
     RUN_SUITE(store_pragmas);
     RUN_SUITE(store_checkpoint);
+    RUN_SUITE(dump_verify_io);
 
     /* Cypher (M6) */
     RUN_SUITE(cypher);

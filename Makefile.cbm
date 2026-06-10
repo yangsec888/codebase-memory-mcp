@@ -111,7 +111,8 @@ FOUNDATION_SRCS = \
     src/foundation/compat_regex.c \
     src/foundation/mem.c \
     src/foundation/diagnostics.c \
-    src/foundation/profile.c
+    src/foundation/profile.c \
+    src/foundation/dump_verify.c
 
 # Existing extraction C code (compiled from current location)
 EXTRACTION_SRCS = \
@@ -292,7 +293,8 @@ TEST_FOUNDATION_SRCS = \
     tests/test_str_intern.c \
     tests/test_log.c \
     tests/test_str_util.c \
-    tests/test_platform.c
+    tests/test_platform.c \
+    tests/test_dump_verify.c
 
 TEST_EXTRACTION_SRCS = \
     tests/test_extraction.c \
@@ -310,7 +312,8 @@ TEST_STORE_SRCS = \
     tests/test_store_arch.c \
     tests/test_store_bulk.c \
     tests/test_store_pragmas.c \
-    tests/test_store_checkpoint.c
+    tests/test_store_checkpoint.c \
+    tests/test_dump_verify_io.c
 
 TEST_CYPHER_SRCS = \
     tests/test_cypher.c

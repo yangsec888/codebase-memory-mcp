@@ -90,6 +90,10 @@ struct cbm_pipeline {
 
     /* User-defined extension overrides (loaded once per run) */
     cbm_userconfig_t *userconfig;
+
+    /* Committed graph size at dump time (-1 = dump did not run). #334 gate axis. */
+    int committed_nodes;
+    int committed_edges;
 };
 
 /* ── Global pkgmap (one active pipeline at a time) ─────────────── */
@@ -149,6 +153,8 @@ cbm_pipeline_t *cbm_pipeline_new(const char *repo_path, const char *db_path,
     p->project_name = cbm_project_name_from_path(repo_path);
     p->mode = mode;
     p->persistence = false;
+    p->committed_nodes = -1;
+    p->committed_edges = -1;
     atomic_init(&p->cancelled, 0);
 
     return p;
@@ -208,6 +214,15 @@ void cbm_pipeline_get_excluded(const cbm_pipeline_t *p, char ***out, int *count)
     }
     if (count) {
         *count = p ? p->excluded_count : 0;
+    }
+}
+
+void cbm_pipeline_get_committed_counts(const cbm_pipeline_t *p, int *nodes, int *edges) {
+    if (nodes) {
+        *nodes = p ? p->committed_nodes : -1;
+    }
+    if (edges) {
+        *edges = p ? p->committed_edges : -1;
     }
 }
 
@@ -814,6 +829,8 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
         cbm_log_error("pipeline.err", "phase", "dump");
         return rc;
     }
+    p->committed_nodes = cbm_gbuf_node_count(p->gbuf);
+    p->committed_edges = cbm_gbuf_edge_count(p->gbuf);
     cbm_log_info("pass.timing", "pass", "dump", "elapsed_ms", itoa_buf((int)elapsed_ms(*t)));
     cbm_store_t *hash_store = cbm_store_open_path(db_path);
     if (hash_store) {
